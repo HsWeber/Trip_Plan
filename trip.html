@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>黄色韦伯全新力作，日本行程规划器</title>
+  <!-- Leaflet 样式 -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <style>
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      margin: 0;
+      text-align: center;
+    }
+    h1 {
+      margin: 18px 0;
+    }
+    .toolbar {
+      margin: 8px;
+    }
+    button {
+      padding: 6px 12px;
+      margin: 0 4px;
+    }
+    table {
+      border-collapse: collapse;
+      margin: 10px auto;
+      min-width: 920px;
+    }
+    th,
+    td {
+      border: 1px solid #ccc;
+      padding: 8px 12px;
+      min-width: 90px;
+      user-select: none;
+    }
+    th {
+      background: #eee;
+    }
+    td:first-child {
+      background: #fafafa;
+      font-weight: bold;
+    }
+    td[data-editable] {
+      cursor: pointer;
+    }
+    .has-data {
+      background: #d7f8d7;
+    }
+    #map {
+      width: 95%;
+      max-width: 1200px;
+      height: 500px;
+      margin: 20px auto;
+      border: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+  <h1>黄色韦伯全新力作，日本行程规划器</h1>
+  <div class="toolbar">
+    <button id="reset-all">重置全部行程</button>
+    <span style="color:#d7f8d7">绿色单元格=已填行程；点击空格填写地点</span>
+  </div>
+
+  <table id="plan-table">
+    <thead>
+      <tr>
+        <th>日期 / 时段</th>
+        <th>上午</th>
+        <th>下午</th>
+        <th>晚上</th>
+      </tr>
+    </thead>
+    <tbody id="plan-body"></tbody>
+  </table>
+
+  <div id="map"></div>
+
+  <!-- Firebase SDK 兼容版 -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    /******************** 1. 日期与时段 ********************/
+    const dateList = [
+      '2025-08-22',
+      '2025-08-23',
+      '2025-08-24',
+      '2025-08-25',
+      '2025-08-26',
+      '2025-08-27'
+    ];
+    function periodsOf(date) {
+        if (date === '2025-08-22') return ['morning', 'afternoon', 'evening']; // 只有晚上
+      if (date === '2025-08-27') return ['morning', 'afternoon', 'evening'];
+      return ['morning', 'afternoon', 'evening'];
+    }
+    const periodName = {
+      morning: '上午',
+      afternoon: '下午',
+      evening: '晚上'
+    };
+
+    /******************** 2. Firebase 初始化 ********************/
+    const firebaseConfig = {
+      apiKey: "AIzaSyDIgD2OsOizLvCfeMbtN-J8FCr7UyOvflI",
+      authDomain: "trip-9505e.firebaseapp.com",
+      databaseURL: "https://trip-9505e-default-rtdb.firebaseio.com",
+      projectId: "trip-9505e",
+      storageBucket: "trip-9505e.firebasestorage.app",
+      messagingSenderId: "823300423696",
+      appId: "1:823300423696:web:92e42401e7cba177b84a95"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    /******************** 3. 构建表格 ********************/
+    const tbody = document.getElementById('plan-body');
+    function buildTable() {
+      tbody.innerHTML = '';
+      dateList.forEach(date => {
+        const row = document.createElement('tr');
+        const label = `${date.slice(5)} (周${'日一二三四五六'[new Date(date).getDay()]})`;
+        const dateTd = document.createElement('td');
+        dateTd.textContent = label;
+        row.appendChild(dateTd);
+        periodsOf(date).forEach(p => {
+          const td = document.createElement('td');
+          td.dataset.date = date;
+          td.dataset.period = p;
+          td.setAttribute('data-editable', '1');
+          row.appendChild(td);
+        });
+        tbody.appendChild(row);
+      });
+    }
+
+    /******************** 4. Geocoding (Nominatim) ********************/
+    async function geocode(place) {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(place)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('网络错误');
+      const data = await res.json();
+      if (!data.length) throw new Error('未找到地点');
+      return { lat: +data[0].lat, lng: +data[0].lon, name: data[0].display_name };
+    }
+
+    /******************** 5. Firebase helpers ********************/
+    const refItinerary = date_period => db.ref(`itinerary/${date_period}`);
+    const key = (d, p) => `${d}_${p}`;
+    async function savePlan(date, period, place, coord) {
+      await refItinerary(key(date, period)).push({ place, lat: coord.lat, lng: coord.lng });
+    }
+    function clearSlot(date, period) {
+      return refItinerary(key(date, period)).remove();
+    }
+
+    /******************** 6. 表格交互 ********************/
+    async function onCellClick(e) {
+      const td = e.currentTarget;
+      const date = td.dataset.date;
+      const period = td.dataset.period;
+      const existing = td.dataset.hasData === '1';
+      const place = prompt('输入地点 (留空删除):', existing ? td.textContent : '');
+      if (place === null) return; // 取消
+      if (place.trim() === '') {
+        await clearSlot(date, period);
+        return;
+      }
+      try {
+        const coord = await geocode(place);
+        await savePlan(date, period, place.trim(), coord);
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+    function bindTableEvents() {
+      document.querySelectorAll('td[data-editable]').forEach(td => td.addEventListener('click', onCellClick));
+    }
+
+    /******************** 7. Leaflet 地图 ****************************/
+    let map, polyline, markers = [];
+    function initMap() {
+      map = L.map('map').setView([35.6812, 139.7671], 5);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
+      polyline = L.polyline([], { color: '#3388ff' }).addTo(map);
+    }
+    function clearMap() {
+      markers.forEach(m => m.remove());
+      markers = [];
+      polyline.setLatLngs([]);
+    }
+    function renderMap(data) {
+      clearMap();
+      const arr = [];
+      Object.entries(data || {}).forEach(([slot, obj]) => Object.values(obj).forEach(v => arr.push({ ...v, slot })));
+      const order = ['morning', 'afternoon', 'evening'];
+      arr.sort((a, b) => {
+        const [da, pa] = a.slot.split('_');
+        const [db, pb] = b.slot.split('_');
+        if (da !== db) return new Date(da) - new Date(db);
+        return order.indexOf(pa) - order.indexOf(pb);
+      });
+      const path = [];
+      arr.forEach(item => {
+        const pos = [item.lat, item.lng];
+        path.push(pos);
+        const marker = L.marker(pos).addTo(map).bindPopup(`<b>${item.place}</b>`);
+        markers.push(marker);
+      });
+      polyline.setLatLngs(path);
+      if (path.length) map.fitBounds(L.latLngBounds(path), { padding: [40, 40] });
+    }
+
+    /******************** 8. Firebase 监听 ****************************/
+    function listen() {
+      db.ref('itinerary').on('value', snap => {
+        const data = snap.val() || {};
+        document.querySelectorAll('td[data-editable]').forEach(td => {
+          const k = key(td.dataset.date, td.dataset.period);
+          const slot = data[k];
+          if (slot) {
+            td.classList.add('has-data');
+            td.dataset.hasData = '1';
+            td.textContent = Object.values(slot)[0].place;
+          } else {
+            td.classList.remove('has-data');
+            td.dataset.hasData = '0';
+            td.textContent = '';
+          }
+        });
+        renderMap(data);
+      });
+    }
+
+    /******************** 9. 重置按钮 ****************************/
+    document.getElementById('reset-all').addEventListener('click', async () => {
+      if (confirm('确定删除全部行程？')) await db.ref('itinerary').remove();
+    });
+
+    /******************** 10. 初始化 ****************************/
+    buildTable();
+    bindTableEvents();
+    initMap();
+    listen();
+  </script>
+</body>
+</html>
